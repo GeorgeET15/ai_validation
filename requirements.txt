@@ -1,0 +1,7 @@
+Flask==3.0.3
+pandas==2.2.3
+langchain-openai==0.2.2
+requests==2.32.3
+flask-cors==5.0.0
+langchain==0.3.3
+python-dotenv==1.0.1
