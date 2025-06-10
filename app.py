@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import logging
 import traceback
 import numpy as np
+import urllib.request
+import tempfile
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,7 +20,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)  # Allow all origins
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Initialize OpenAI model
 try:
@@ -36,6 +38,9 @@ except Exception as e:
 # API endpoints
 PROPOSAL_API_URL = "https://api-int.uat-riskcovry.com/motor/v2/plans/selected_plan_information?quote_id={}"
 PLAN_LISTING_API_URL = "https://api-int.uat-riskcovry.com/motor/fetch_quote_list?quote_id={}"
+
+# Store uploaded CSV path
+UPLOADED_CSV_PATH = None
 
 def fetch_api_data(quote_id: str) -> tuple[Dict, List]:
     headers = {
@@ -58,10 +63,8 @@ def fetch_api_data(quote_id: str) -> tuple[Dict, List]:
         raise ValueError(f"API fetch failed: {str(e)}")
 
 def validate_field(expected: Any, actual: Any, field: str, context: Dict = None) -> Dict:
-    # Normalize expected and actual to check for logical equivalence
     null_values = [None, "", "None", "nan", "NaN"]
     
-    # Normalize expected
     if isinstance(expected, float) and np.isnan(expected):
         expected_normalized = None
     elif isinstance(expected, str) and expected.lower() in ["nan", "none"]:
@@ -69,7 +72,6 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
     else:
         expected_normalized = expected
 
-    # Normalize actual
     if isinstance(actual, float) and np.isnan(actual):
         actual_normalized = None
     elif isinstance(actual, str) and actual.lower() in ["nan", "none"]:
@@ -77,7 +79,6 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
     else:
         actual_normalized = actual
 
-    # Check if both are null-like values
     if (expected_normalized is None or str(expected_normalized).lower() in null_values) and \
        (actual_normalized is None or str(actual_normalized).lower() in null_values):
         return {
@@ -112,19 +113,24 @@ Context:
 {context}
 
 Instructions:
-- Treat 'nan', 'NaN', 'None', null, and empty string as equivalent null values.
-- Check for exact value match, case-insensitive if string.
-- Respect data types (e.g., int ≠ str) unless both are null-like.
-- If `expected` is "min" or "max", and context contains min/max range, validate accordingly.
-- Explain mismatches clearly, e.g., wrong IDV range, missing discount, mismatched previous policy data.
+- Always return a valid JSON object with exactly these keys: "field", "expected", "actual", "status", "reason".
+- Treat 'nan', 'NaN', 'None', null, and empty string as equivalent null values; represent them as "null" in the JSON output.
+- For the field 'claim_taken', if actual is null and expected is "No", treat them as equivalent and pass the comparison.
+- For strings, compare case-insensitively. For numbers, compare exactly. Respect data types unless both are null-like or field is 'claim_taken'.
+- If `expected` is "min" or "max" and context includes "min_idv" or "max_idv", validate against the respective range value.
+- For arrays, compare as lists, ensuring all expected elements are in actual.
+- If inputs are invalid, return {{"status": "Fail", "reason": "Invalid input data"}}.
+- Escape special characters in "expected", "actual", and "reason" to ensure valid JSON.
+- Keep "reason" concise (20-50 words).
+- Ensure JSON syntax is correct.
 
-Respond with JSON only:
+Return:
 {{
   "field": "{field}",
   "expected": "{expected}",
   "actual": "{actual}",
   "status": "Pass" | "Fail" | "Pending",
-  "reason": "Clear and short explanation"
+  "reason": "Clear explanation here"
 }}
 """
     )
@@ -136,9 +142,30 @@ Respond with JSON only:
             actual=str(actual_normalized if actual_normalized is not None else "null"),
             context=json.dumps(context or {})
         ))
-        return json.loads(response.content)
+        logging.debug(f"Raw LLM response for field {field}: {response.content}")
+        if not response.content or response.content.isspace():
+            logging.error(f"Empty LLM response for field {field}")
+            return {
+                "field": field,
+                "expected": str(expected),
+                "actual": str(actual),
+                "status": "Fail",
+                "reason": "Empty LLM response"
+            }
+        try:
+            return json.loads(response.content)
+        except json.JSONDecodeError as json_err:
+            logging.error(f"Invalid JSON response for field {field}: {json_err}, Raw: {response.content}")
+            return {
+                "field": field,
+                "expected": str(expected),
+                "actual": str(actual),
+                "status": "Fail",
+                "reason": f"Invalid LLM response: {str(json_err)}"
+            }
     except Exception as e:
         logging.error(f"Validation error for field {field}: {str(e)}")
+        logging.debug(f"Stack trace: {traceback.format_exc()}")
         return {
             "field": field,
             "expected": str(expected),
@@ -148,7 +175,6 @@ Respond with JSON only:
         }
 
 def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict) -> List[Dict]:
-    """Validate all required fields."""
     logging.info("Starting quote validation")
     results = []
     quote = next((q for q in plan_listing_data.get("quotes", []) if q["id"] == proposal_data["quotation_id"]), None)
@@ -163,7 +189,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         logging.error(f"Validation failed: {result}")
         return [result]
 
-    # NCB applicability
     ncb_context = {
         "is_new_business": proposal_data["vehicle"].get("business_type") == "new_business",
         "is_ownership_transferred": proposal_data["vehicle"].get("is_ownership_transferred", False),
@@ -181,7 +206,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     )
     logging.debug(f"NCB applicable: {ncb_applicable}")
 
-    # Validate addons
     addons_value = test_data.get("addons", "")
     logging.debug(f"Addons value: {addons_value}, type: {type(addons_value)}")
     if isinstance(addons_value, float) and np.isnan(addons_value):
@@ -191,23 +215,20 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     else:
         expected_addons = []
     actual_addons = [addon["cover_code"] for addon in proposal_data.get("addons", []) if addon.get("selected")]
-    # Check for mandatory addons (is_removable: false)
     mandatory_addons = [addon["cover_code"] for addon in proposal_data.get("addons", []) if addon.get("is_removable", True) == False]
-    logging.debug(f"Mandatory addons (is_removable: false): {mandatory_addons}")
-    # If expected is empty and actual contains mandatory addons, pass with mandatory flag
+    logging.debug(f"Mandatory addons: {mandatory_addons}")
     if not expected_addons and actual_addons and all(addon in mandatory_addons for addon in actual_addons):
         results.append({
             "field": "addons",
             "expected": str(addons_value),
             "actual": str(actual_addons),
             "status": "Pass",
-            "reason": "Expected addons are empty; actual addons are mandatory (is_removable: false)",
+            "reason": "Expected addons are empty; actual addons are mandatory",
             "is_mandatory": True
         })
     else:
         results.append(validate_field(expected_addons, actual_addons, "addons"))
 
-    # Validate discounts
     discounts_value = test_data.get("discounts", "")
     logging.debug(f"Discounts value: {discounts_value}, type: {type(discounts_value)}")
     if isinstance(discounts_value, float) and np.isnan(discounts_value):
@@ -231,7 +252,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     else:
         results.append(validate_field(expected_discounts, actual_discounts, "discounts", ncb_discount_context))
 
-    # Validate IDV
     idv_value = test_data.get("idv", "")
     logging.debug(f"IDV value: {idv_value}, type: {type(idv_value)}")
     if isinstance(idv_value, float) and np.isnan(idv_value):
@@ -278,30 +298,33 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     else:
         results.append(validate_field(expected_idv, actual_idv, "idv", idv_context))
 
-    # Validate NCB
     expected_ncb = test_data.get("previous_ncb", "")
     actual_ncb = proposal_data["vehicle"].get("previous_policy_ncb")
     results.append(validate_field(expected_ncb, actual_ncb, "previous_ncb", {"ncb_applicable": ncb_applicable}))
 
-    # Validate previous policy fields
     previous_fields = [
         "previous_expiry_date", "previous_insurer", "previous_tp_expiry_date",
         "previous_tp_insurer", "claim_taken"
     ]
     for field in previous_fields:
-        api_field = field if field == "claim_taken" else f"previous_policy_{field.replace('previous_', '')}"
-        if field == "previous_tp_insurer":
+        if field == "previous_insurer":
+            api_field = "previous_policy_carrier_name"
+        elif field == "previous_tp_insurer":
             api_field = "previous_tp_policy_carrier_name"
         elif field == "previous_tp_expiry_date":
             api_field = "previous_tp_policy_expiry_date"
+        elif field == "claim_taken":
+            api_field = "claim_taken"
+        else:
+            api_field = f"previous_policy_{field.replace('previous_', '')}"
         expected = test_data.get(field, "")
         actual = proposal_data["vehicle"].get(api_field)
+        if field == "previous_insurer":
+            logging.debug(f"Validating previous_insurer: expected={expected}, actual={actual}")
         results.append(validate_field(expected, actual, field))
 
-    # Validate proposal number
     results.append(validate_field("non-empty", proposal_data.get("proposal_number"), "proposal_number"))
 
-    # Validate inspection
     expected_inspection = test_data.get("is_inspection_required", "No") == "Yes"
     actual_inspection = proposal_data["vehicle"].get("is_break_in")
     results.append(validate_field(expected_inspection, actual_inspection, "is_break_in"))
@@ -319,8 +342,62 @@ def serve_script():
     logging.info("Serving script.js")
     return send_file('script.js')
 
+@app.route('/upload_csv', methods=['POST', 'OPTIONS'])
+def upload_csv():
+    global UPLOADED_CSV_PATH
+    if request.method == 'OPTIONS':
+        logging.info("Handling OPTIONS request for /upload_csv")
+        return jsonify({}), 200
+
+    logging.info("Received /upload_csv POST request")
+    
+    try:
+        if 'csvFile' in request.files:
+            csv_file = request.files['csvFile']
+            if csv_file.filename == '':
+                logging.error("No file selected")
+                return jsonify({"error": "No file selected."}), 400
+            if not csv_file.filename.endswith('.csv'):
+                logging.error("Invalid file type")
+                return jsonify({"error": "Please upload a CSV file."}), 400
+            temp_dir = tempfile.gettempdir()
+            UPLOADED_CSV_PATH = os.path.join(temp_dir, csv_file.filename)
+            csv_file.save(UPLOADED_CSV_PATH)
+            logging.info(f"CSV file saved to {UPLOADED_CSV_PATH}")
+        elif 'csvUrl' in request.form:
+            csv_url = request.form['csvUrl']
+            if not csv_url.endswith('.csv'):
+                logging.error("Invalid URL: not a CSV file")
+                return jsonify({"error": "URL must point to a CSV file."}), 400
+            temp_dir = tempfile.gettempdir()
+            UPLOADED_CSV_PATH = os.path.join(temp_dir, 'downloaded_csv.csv')
+            try:
+                urllib.request.urlretrieve(csv_url, UPLOADED_CSV_PATH)
+                logging.info(f"CSV downloaded from {csv_url} to {UPLOADED_CSV_PATH}")
+            except Exception as e:
+                logging.error(f"Failed to download CSV from URL: {str(e)}")
+                return jsonify({"error": f"Failed to download CSV: {str(e)}"}), 400
+        else:
+            logging.error("No CSV file or URL provided")
+            return jsonify({"error": "Please provide a CSV file or URL."}), 400
+
+        try:
+            pd.read_csv(UPLOADED_CSV_PATH)
+            logging.info("CSV file verified successfully")
+            return jsonify({"message": "CSV uploaded successfully."}), 200
+        except Exception as e:
+            logging.error(f"Invalid CSV file: {str(e)}")
+            UPLOADED_CSV_PATH = None
+            return jsonify({"error": f"Invalid CSV file: {str(e)}"}), 400
+    except Exception as e:
+        logging.error(f"Upload error: {str(e)}")
+        logging.debug(f"Stack trace: {traceback.format_exc()}")
+        return jsonify({"error": f"Upload error: {str(e)}"}), 500
+    
+    
 @app.route('/validate', methods=['POST'])
 def validate():
+    global UPLOADED_CSV_PATH
     logging.info("Received /validate request")
     quote_id = request.form.get('quote_id')
     if not quote_id:
@@ -328,23 +405,26 @@ def validate():
         return jsonify({"error": "Quote ID is required."}), 400
 
     try:
-        # Read test data from CSV
+        # Read test data from uploaded CSV
+        if not UPLOADED_CSV_PATH:
+            logging.error("No CSV file uploaded")
+            return jsonify({"error": "Please upload a CSV file first."}), 400
         try:
-            logging.info("Reading CSV file: ./test_data.csv")
-            df = pd.read_csv("./test_data.csv")
+            logging.info(f"Reading CSV file: {UPLOADED_CSV_PATH}")
+            df = pd.read_csv(UPLOADED_CSV_PATH)
             logging.debug(f"CSV loaded: {len(df)} rows, columns: {list(df.columns)}")
             test_data = df.iloc[0].to_dict()
             logging.debug(f"Test data: {test_data}")
         except FileNotFoundError:
-            logging.error("test_data.csv not found")
-            return jsonify({"error": "CSV file not found: ./test_data.csv"}), 400
+            logging.error("Uploaded CSV file not found")
+            return jsonify({"error": "Uploaded CSV file not found."}), 400
         except Exception as e:
             logging.error(f"CSV reading error: {str(e)}")
             logging.debug(f"Stack trace: {traceback.format_exc()}")
             return jsonify({"error": f"Failed to read CSV: {str(e)}"}), 400
 
         # Fetch API data
-        logging.info(f"Fetchinng API data for quote_id: {quote_id}")
+        logging.info(f"Fetching API data for quote_id: {quote_id}")
         proposal_data, plan_listing_data = fetch_api_data(quote_id)
         
         # Validate
