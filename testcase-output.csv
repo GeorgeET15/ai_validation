@@ -1,0 +1,4 @@
+TestcaseId,PolicyNumber,ProposalNumber,ThankURL,Logs,Timestamp,BUILD_NUMBER
+RELIANCE_PC_THIRD_PARTY_27,,,https://dolphin-int.uat-riskcovry.com/motor/T3/vehicle-details/?package_code=DOLPHIN_MOTOR_RETAIL&business_type=RO&quote_id=,Failed to submit prequote: ,2025-06-10 10:56:29,46
+SBI_MOTOR_TW_OD_05,null,null,https://toyota.int.uat-riskcovry.com/kyc/?quote_id=bA3yTRskznz6vxWRN8uZ&redirection_url=/motor/T3/proposals,null,2025-05-12 11:47:51,574
+SBI_MOTOR_TW_OD_04,,,https://toyota.int.uat-riskcovry.com/kyc/?quote_id=7T5MrZDuirvsJqGRRavf&redirection_url=/motor/T3/proposals,,2025-05-12 11:48:26,574

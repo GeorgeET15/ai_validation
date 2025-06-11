@@ -5,124 +5,163 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Motor Quote Validator</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
-      @keyframes rotate {
-        from {
-          transform: rotate(0deg);
-        }
+      body {
+        font-family: "Inter", sans-serif;
+      }
+      @keyframes spin {
         to {
           transform: rotate(360deg);
         }
       }
-      .loader {
-        animation: rotate 1s linear infinite;
+      .spinner {
+        border: 4px solid #e5e7eb;
+        border-top: 4px solid #1e3a8a;
+        border-radius: 50%;
+        width: 36px;
+        height: 36px;
+        animation: spin 1s linear infinite;
       }
+      .modal-enter {
+        opacity: 0;
+        transform: scale(0.95);
+      }
+      .modal-enter-active {
+        opacity: 1;
+        transform: scale(1);
+        transition: opacity 200ms ease, transform 200ms ease;
+      }
+      .modal-exit {
+        opacity: 1;
+        transform: scale(1);
+      }
+      .modal-exit-active {
+        opacity: 0;
+        transform: scale(0.95);
+        transition: opacity 200ms ease, transform 200ms ease;
+      }
+      .fade-enter {
+        opacity: 0;
+      }
+      .fade-enter-active {
+        opacity: 1;
+        transition: opacity 300ms ease;
+      }
+      .fade-exit {
+        opacity: 1;
+      }
+      .fade-exit-active {
+        opacity: 0;
+        transition: opacity 300ms ease;
+      }
+      .quote-id-button.active {
+        background-color: #ef4444;
+        transform: scale(1.05);
+      }
+      /* Removed conflicting styles that might affect grid */
     </style>
   </head>
-  <body class="min-h-screen flex flex-col font-sans bg-[#f5f5f5]">
-    <header class="bg-white shadow-sm border-b border-[#3123a8]">
-      <div class="container mx-auto flex items-center p-4">
-        <img src="./logo.png" alt="Company Logo" class="h-14 mr-4" />
-        <h1 class="text-2xl font-semibold text-[#3123a8]">
-          Motor Quote Validator
-        </h1>
+  <body class="min-h-screen flex flex-col bg-gray-100 text-gray-800">
+    <header class="bg-white shadow-md">
+      <div class="container mx-auto flex items-center justify-between p-4">
+        <div class="flex items-center">
+          <img src="./logo.png" alt="Company Logo" class="h-12 mr-3" />
+          <h1 class="text-2xl font-semibold text-blue-900">
+            Motor Quote Validator
+          </h1>
+        </div>
       </div>
     </header>
 
-    <main class="flex-grow container mx-auto px-4 py-6">
+    <main class="flex-grow container mx-auto px-4 py-8">
       <section
-        class="bg-white rounded-2xl shadow-sm p-6 max-w-2xl mx-auto mb-6"
+        class="bg-white rounded-2xl shadow-md p-6 max-w-3xl mx-auto mb-8"
       >
-        <h2 class="text-xl font-semibold mb-4 text-[#3123a8]">
-          Upload Test Data CSV File
+        <h2 class="text-xl font-semibold mb-6 text-blue-900">
+          Upload CSV Files
         </h2>
-        <div class="flex flex-col gap-4">
+        <div class="space-y-6">
           <div>
             <label
-              for="csvFile"
-              class="block text-sm font-medium mb-2 text-[#3123a8]"
+              for="inputCsvFile"
+              class="block text-sm font-medium mb-2 text-blue-900"
+              >Test Data Input CSV</label
             >
-              Upload Test Data CSV File
-            </label>
             <input
               type="file"
-              id="csvFile"
+              id="inputCsvFile"
               accept=".csv"
-              class="w-full p-3 border border-[#3123a8] rounded-xl focus:outline-none text-[#3123a8]"
+              class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-900 transition-all"
             />
+            <p id="inputCsvStatus" class="mt-2 text-sm text-gray-600"></p>
+          </div>
+          <div>
+            <label
+              for="outputCsvFile"
+              class="block text-sm font-medium mb-2 text-blue-900"
+              >Test Case Output CSV</label
+            >
+            <input
+              type="file"
+              id="outputCsvFile"
+              accept=".csv"
+              class="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-900 transition-all"
+            />
+            <p id="outputCsvStatus" class="mt-2 text-sm text-gray-600"></p>
           </div>
           <button
-            id="uploadCsv"
-            class="relative px-6 py-3 rounded-xl bg-[#3123a8] text-white hover:bg-[#e5251f] transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
+            id="validateAllButton"
+            disabled
+            class="relative w-full py-3 rounded-lg bg-blue-900 text-white hover:bg-red-500 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
           >
-            <span id="uploadText">Upload Test Data</span>
-            <img
-              id="uploadLoader"
-              src="./logo.png"
-              alt="Loading"
-              class="loader h-6 hidden"
-            />
+            <span id="validateText">Validate</span>
           </button>
+          <p
+            id="validationStatus"
+            class="hidden text-sm text-blue-900 text-center mt-4"
+          ></p>
         </div>
-        <p id="csvStatus" class="mt-2 text-sm text-[#3123a8]"></p>
       </section>
 
-      <section class="bg-white rounded-2xl shadow-sm p-6 max-w-2xl mx-auto">
-        <h2 class="text-xl font-semibold mb-4 text-[#3123a8]">
-          Enter Quote ID
+      <section class="bg-white rounded-2xl shadow-md p-6 max-w-full mx-auto">
+        <h2 class="text-xl font-semibold mb-6 text-blue-900">
+          Validation Results
         </h2>
-        <form
-          id="quoteForm"
-          class="flex flex-col sm:flex-row items-start sm:items-center gap-4"
-        >
-          <input
-            type="text"
-            id="quoteId"
-            name="quote_id"
-            placeholder="e.g., EDmfxVx5szLr-a4HpAdB"
-            class="w-full sm:flex-grow p-3 border border-[#3123a8] rounded-xl focus:outline-none text-[#3123a8]"
-          />
-          <button
-            type="submit"
-            id="validateButton"
-            class="px-6 py-3 rounded-xl bg-[#3123a8] text-white hover:bg-[#e5251f] transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            Validate
-          </button>
-        </form>
-
+        <div
+          id="quoteIdScroll"
+          class="flex overflow-x-auto space-x-3 mb-6 pb-2 snap-x"
+        ></div>
         <div id="loading" class="hidden flex justify-center mt-6">
-          <img src="./logo.png" alt="Loading" class="loader h-12" />
+          <div class="spinner"></div>
         </div>
+        <div
+          id="validationResults"
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
+        ></div>
+        <div id="skippedTestCases" class="mt-6"></div>
       </section>
 
       <div
         id="errorDialog"
-        class="hidden fixed inset-0 flex items-center justify-center z-50 bg-[#3123a8]/50"
+        class="hidden fixed inset-0 flex items-center justify-center z-50 bg-blue-900/30 backdrop-blur-sm"
       >
-        <div class="bg-white rounded-xl shadow-lg p-6 max-w-md w-full mx-4">
-          <h3 class="text-lg font-semibold mb-4 text-[#3123a8]">Error</h3>
+        <div class="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full mx-4">
+          <h3 class="text-lg font-semibold mb-4 text-blue-900">Error</h3>
           <p id="errorMessage" class="text-gray-600 mb-6"></p>
           <div class="flex justify-end">
             <button
               id="closeDialog"
-              class="px-4 py-2 rounded-xl bg-[#3123a8] text-white hover:bg-[#e5251f] transition-all"
+              class="px-4 py-2 rounded-lg bg-blue-900 text-white hover:bg-red-500 transition-all"
             >
               Close
             </button>
           </div>
         </div>
       </div>
-
-      <section id="results" class="hidden mt-8">
-        <h2 class="text-xl font-semibold mb-4 text-center text-[#3123a8]">
-          Validation Results
-        </h2>
-        <div
-          id="validationResults"
-          class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
-        ></div>
-      </section>
     </main>
 
     <script src="/script.js"></script>
