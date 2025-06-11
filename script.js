@@ -71,10 +71,18 @@ const uploadCsv = async (fileInput, statusElement, fileType) => {
     return;
   }
 
+  // New: Validate file extension
+  const file = fileInput.files[0];
+  if (!file.name.toLowerCase().endsWith(".csv")) {
+    showError(`Please select a valid .csv file for ${fileType}.`);
+    updateStatus(statusElement, "Invalid file type.", true);
+    return;
+  }
+
   const formData = new FormData();
   formData.append(
     fileType === "input" ? "test_data_input" : "testcase_output",
-    fileInput.files[0]
+    file
   );
 
   try {
@@ -210,6 +218,11 @@ if (elements.validateAllButton) {
       const data = await response.json();
       console.log("Parsed /validate response:", data);
 
+      // New: Check for empty or malformed response
+      if (!data || typeof data !== "object") {
+        throw new Error("Empty or malformed server response");
+      }
+
       if (data.error) {
         throw new Error(data.error);
       }
@@ -224,12 +237,24 @@ if (elements.validateAllButton) {
         `Results: ${results.length}, Skipped: ${skipped.length}, Total: ${total_testcases}, Processed: ${processed_testcases}`
       );
 
+      // New: Group skipped test cases by reason for logging
+      const skippedByReason = skipped.reduce((acc, item) => {
+        const reason = item.reason || "Unknown";
+        acc[reason] = acc[reason] || [];
+        acc[reason].push(item.testcase_id);
+        return acc;
+      }, {});
+      console.log("Skipped test cases by reason:", skippedByReason);
+
       allValidationResults = results;
 
-      // Update validation status
+      // Update validation status with skip info
       try {
         if (elements.validationStatus) {
-          elements.validationStatus.textContent = `${processed_testcases} out of ${total_testcases} test cases validated`;
+          const skipCount = total_testcases - processed_testcases;
+          elements.validationStatus.textContent = `${processed_testcases} out of ${total_testcases} test cases validated${
+            skipCount > 0 ? ` (${skipCount} skipped)` : ""
+          }`;
           elements.validationStatus.classList.remove("hidden");
           elements.validationStatus.classList.add("fade-enter");
           setTimeout(
@@ -275,24 +300,90 @@ if (elements.validateAllButton) {
         showError("Failed to render testcase IDs");
       }
 
-      // Display skipped test cases
+      // Display skipped test cases with enhanced UI
       try {
         console.log("Populating skipped test cases:", skipped);
         if (elements.skippedTestCases && skipped.length > 0) {
+          const unmatchedSkips = skipped.filter((item) =>
+            item.reason.includes("No matching")
+          );
+          const otherSkips = skipped.filter(
+            (item) => !item.reason.includes("No matching")
+          );
+          const hasSkips = skipped.length > 0;
           elements.skippedTestCases.innerHTML = `
-                        <h3 class="text-lg font-semibold text-blue-900 mb-3">Skipped Test Cases</h3>
-                        <ul class="list-disc pl-5 text-gray-600 space-y-2">
-                            ${skipped
-                              .map(
-                                (item) =>
-                                  `<li class="text-sm">${escapeHtml(
-                                    item.testcase_id || "Unknown"
-                                  )}: ${escapeHtml(
-                                    item.reason || "No reason"
-                                  )}</li>`
-                              )
-                              .join("")}
-                        </ul>
+                        <div class="bg-white border rounded-2xl shadow-md p-5">
+                            <h3 class="text-lg font-semibold text-blue-900 mb-3 flex items-center">
+                                Skipped Test Cases (${skipped.length})
+                                <button id="toggleSkipped" class="ml-2 text-sm text-blue-600 hover:text-blue-800 focus:outline-none">
+                                    ${hasSkips ? "Hide" : "Show"}
+                                </button>
+                            </h3>
+                            <div id="skippedContent" class="${
+                              hasSkips ? "" : "hidden"
+                            }">
+                                ${
+                                  unmatchedSkips.length > 0
+                                    ? `
+                                        <h4 class="text-sm font-medium text-blue-900 mb-2">Unmatched Test Cases</h4>
+                                        <ul class="list-disc pl-5 text-yellow-600 space-y-2 mb-4">
+                                            ${unmatchedSkips
+                                              .map(
+                                                (item) =>
+                                                  `<li class="text-sm">${escapeHtml(
+                                                    item.testcase_id ||
+                                                      "Unknown"
+                                                  )}: ${escapeHtml(
+                                                    item.reason || "No reason"
+                                                  )}</li>`
+                                              )
+                                              .join("")}
+                                        </ul>
+                                    `
+                                    : ""
+                                }
+                                ${
+                                  otherSkips.length > 0
+                                    ? `
+                                        <h4 class="text-sm font-medium text-blue-900 mb-2">Other Skipped Test Cases</h4>
+                                        <ul class="list-disc pl-5 text-gray-600 space-y-2">
+                                            ${otherSkips
+                                              .map(
+                                                (item) =>
+                                                  `<li class="text-sm">${escapeHtml(
+                                                    item.testcase_id ||
+                                                      "Unknown"
+                                                  )}: ${escapeHtml(
+                                                    item.reason || "No reason"
+                                                  )}</li>`
+                                              )
+                                              .join("")}
+                                        </ul>
+                                    `
+                                    : ""
+                                }
+                            </div>
+                        </div>
+                    `;
+          // Add toggle functionality
+          const toggleButton = document.getElementById("toggleSkipped");
+          const skippedContent = document.getElementById("skippedContent");
+          if (toggleButton && skippedContent) {
+            toggleButton.addEventListener("click", () => {
+              skippedContent.classList.toggle("hidden");
+              toggleButton.textContent = skippedContent.classList.contains(
+                "hidden"
+              )
+                ? "Show"
+                : "Hide";
+            });
+          }
+        } else if (elements.skippedTestCases) {
+          elements.skippedTestCases.innerHTML = `
+                        <div class="bg-white border rounded-2xl shadow-md p-5">
+                            <h3 class="text-lg font-semibold text-blue-900 mb-3">Skipped Test Cases (0)</h3>
+                            <p class="text-gray-500 text-sm">No test cases were skipped.</p>
+                        </div>
                     `;
         }
       } catch (err) {
