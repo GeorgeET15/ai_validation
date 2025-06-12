@@ -9,7 +9,6 @@ from langchain.prompts import PromptTemplate
 from typing import Dict, List, Any
 from dotenv import load_dotenv
 import logging
-import traceback
 import numpy as np
 import urllib.parse
 import re
