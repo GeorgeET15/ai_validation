@@ -1,7 +1,6 @@
-<p align="left">
-  <img src="logo_with_bg.png" alt="Logo" width="40" style="vertical-align:middle; margin-right:10px"/>
-  <span style="font-size:2em; vertical-align:middle;"><strong>Motor Quote Validator</strong></span>
-</p>
+<img src="logo_with_bg.png" alt="Logo" width="50"/>
+
+# Motor Quote Validator
 
 A web-based application to validate motor insurance quotes by comparing expected values from a CSV file against actual values fetched from APIs. Built with Flask (backend), HTML/JavaScript (frontend), and integrated with an OpenAI model for complex field comparisons.
 
