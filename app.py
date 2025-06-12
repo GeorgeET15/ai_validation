@@ -699,6 +699,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
 
     # Discounts validation
     discounts_value = test_data.get("discounts", "")
+    allowed_discounts = ["ANTI_THEFT_DISCOUNT", "VOLUNTARY_DEDUCTIBLE_DISCOUNT", "TPPD_DISCOUNT"]
     expected_discounts = []
     
     if isinstance(discounts_value, float) and np.isnan(discounts_value):
@@ -759,38 +760,62 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
             logging.debug(f"Parsed comma-separated discounts: {expected_discounts}")
     
     actual_discounts = [d.get("code") for d in proposal_data.get("discounts", [])]
-    ncb_discount_context = {"ncb_applicable": ncb_applicable, "discounts": actual_discounts}
-    if not expected_discounts and (not actual_discounts or actual_discounts == ["NCB_DISCOUNT"]):
+    
+    # Validate that expected_discounts only contain allowed discounts
+    invalid_discounts = [d for d in expected_discounts if d not in allowed_discounts]
+    if invalid_discounts:
         results.append({
             "field": "discounts",
             "expected": str(discounts_value),
             "actual": str(actual_discounts),
-            "status": "Pass",
-            "reason": f"No discounts expected ('{discounts_value}'). Actual discounts {actual_discounts} "
-                      f"{'are empty, which is valid.' if not actual_discounts else 'contain only NCB_DISCOUNT, which is allowed per rules.'}"
-        })
-    elif ncb_applicable and "NCB_DISCOUNT" not in actual_discounts:
-        results.append({
-            "field": "discounts",
-            "expected": "NCB_DISCOUNT",
-            "actual": str(actual_discounts),
             "status": "Fail",
-            "reason": f"NCB_DISCOUNT expected for '{ncb_context['product_code']}' as NCB is applicable "
-                      f"(new_business={ncb_context['is_new_business']}, "
-                      f"ownership_transferred={ncb_context['is_ownership_transferred']}, "
-                      f"policy_type={ncb_context['previous_policy_type']}). "
-                      f"Actual discounts {actual_discounts} do not include NCB_DISCOUNT."
+            "reason": f"Invalid discounts in test data: {invalid_discounts}. Only {allowed_discounts} are allowed."
         })
     elif results and results[-1].get("field") == "discounts" and results[-1]["status"] == "Fail":
         # Skip further validation if JSON parsing failed
         pass
     else:
-        fields_to_validate.append({
-            "field": "discounts",
-            "expected": expected_discounts,
-            "actual": actual_discounts,
-            "context": {"ncb_applicable": ncb_applicable}
-        })
+        # Check if expected discounts are present in actual discounts
+        missing_discounts = [d for d in expected_discounts if d not in actual_discounts]
+        if not expected_discounts and (not actual_discounts or actual_discounts == ["NCB_DISCOUNT"]):
+            results.append({
+                "field": "discounts",
+                "expected": str(discounts_value),
+                "actual": str(actual_discounts),
+                "status": "Pass",
+                "reason": f"No discounts expected ('{discounts_value}'). Actual discounts {actual_discounts} "
+                          f"{'are empty, which is valid.' if not actual_discounts else 'contain only NCB_DISCOUNT, which is allowed per rules.'}"
+            })
+        elif ncb_applicable and "NCB_DISCOUNT" not in actual_discounts:
+            results.append({
+                "field": "discounts",
+                "expected": "NCB_DISCOUNT",
+                "actual": str(actual_discounts),
+                "status": "Fail",
+                "reason": f"NCB_DISCOUNT expected for '{ncb_context['product_code']}' as NCB is applicable "
+                          f"(new_business={ncb_context['is_new_business']}, "
+                          f"ownership_transferred={ncb_context['is_ownership_transferred']}, "
+                          f"policy_type={ncb_context['previous_policy_type']}). "
+                          f"Actual discounts {actual_discounts} do not include NCB_DISCOUNT."
+            })
+        elif missing_discounts:
+            results.append({
+                "field": "discounts",
+                "expected": str(expected_discounts),
+                "actual": str(actual_discounts),
+                "status": "Fail",
+                "reason": f"Expected discounts {expected_discounts} not fully present in actual discounts {actual_discounts}. "
+                          f"Missing discounts: {missing_discounts}."
+            })
+        else:
+            results.append({
+                "field": "discounts",
+                "expected": str(expected_discounts),
+                "actual": str(actual_discounts),
+                "status": "Pass",
+                "reason": f"Expected discounts {expected_discounts} are present in actual discounts {actual_discounts}. "
+                          f"Extra discounts in actual are allowed."
+            })
 
     # IDV validation
     idv_value = test_data.get("idv", "")
@@ -857,9 +882,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         "actual": proposal_data.get("vehicle", {}).get("previous_policy_ncb"),
         "context": {"ncb_applicable": ncb_applicable}
     })
-
-    # Log test_data keys for debugging
-    logging.debug(f"test_data keys: {list(test_data.keys())}")
 
     previous_fields = [
         "previous_expiry_date", "previous_insurer", "previous_tp_expiry_date",
@@ -954,6 +976,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
 
     logging.info(f"Quote validation completed in {time.time() - start_time:.2f} seconds")
     return results
+
 
 @app.route('/')
 def index():
