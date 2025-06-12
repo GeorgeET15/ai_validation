@@ -76,12 +76,25 @@
       .validate-button:hover:not(:disabled) {
         background-color: #2563eb;
       }
+      .rotating-png {
+        height: 50px;
+        animation: rotate 2s linear infinite;
+      }
+
+      @keyframes rotate {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
     </style>
   </head>
   <body class="min-h-screen flex flex-col text-gray-900">
     <header class="bg-white border-b border-gray-200">
       <div class="container mx-auto flex items-center p-4">
-        <img src="./logo.png" alt="Company Logo" class="h-10 mr-3" />
+        <img src="./logo.png" alt="Company Logo" class="h-16 mr-3" />
         <h1 class="text-xl font-semibold text-gray-800">
           Motor Quote Validator
         </h1>
@@ -149,7 +162,7 @@
           class="flex overflow-x-auto space-x-2 mb-4 pb-2 snap-x"
         ></div>
         <div id="loading" class="hidden flex justify-center mt-4">
-          <div class="spinner"></div>
+          <img src="./logo.png" alt="Loading" class="rotating-png" />
         </div>
         <div
           id="validationResults"
