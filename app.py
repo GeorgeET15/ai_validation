@@ -15,7 +15,7 @@ import urllib.parse
 import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from cachetools import TTLCache
+from cachetools import TTLCache   # type: ignore
 import time
 from dateutil.parser import parse as parse_date
 from datetime import datetime, timedelta
@@ -158,7 +158,6 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"For '{field}', expected 'No' is equivalent to actual empty value, as empty is treated as 'No' per validation rules."
         }
     
-    # Handle date fields (e.g., previous_tp_expiry_date, previous_expiry_date)
     if field in ["previous_tp_expiry_date", "previous_expiry_date"]:
         if expected_normalized is None and actual_normalized is None:
             return {
@@ -169,68 +168,94 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                 "reason": f"Date comparison for '{field}': both expected and actual are empty, considered equivalent."
             }
         try:
-            # Parse actual date
+            # Parse actual date (flexible for formats like '05 Feb 2026')
             actual_date = parse_date(str(actual_normalized)) if actual_normalized else None
-            
+            logging.debug(f"Parsed actual date for '{field}': '{actual_normalized}' -> {actual_date}")
+
+            # Parse expected date, prioritizing DD/MM/YYYY for CSV input
+            expected_date = None
+            if expected_normalized:
+                # Check if expected matches DD/MM/YYYY pattern (e.g., 05/02/2026)
+                if isinstance(expected_normalized, str) and re.match(r'^\d{2}/\d{2}/\d{4}$', expected_normalized):
+                    try:
+                        expected_date = datetime.strptime(expected_normalized, '%d/%m/%Y')
+                        logging.debug(f"Parsed expected date for '{field}' as DD/MM/YYYY: '{expected_normalized}' -> {expected_date}")
+                    except ValueError as e:
+                        logging.warning(f"Failed to parse expected date '{expected_normalized}' as DD/MM/YYYY: {str(e)}")
+                        # Fallback to parse_date
+                        expected_date = parse_date(str(expected_normalized))
+                        logging.debug(f"Fallback parsing for expected date: '{expected_normalized}' -> {expected_date}")
+                else:
+                    expected_date = parse_date(str(expected_normalized))
+                    logging.debug(f"Parsed expected date for '{field}': '{expected_normalized}' -> {expected_date}")
+
             # Initialize variables
             computed_date_str = None
             computed_date = None
-            csv_matches = False
-            computed_matches = False
             reason_parts = []
-            
-            # Parse CSV expected date
-            expected_date = parse_date(str(expected_normalized)) if expected_normalized else None
+
+            # Compare parsed dates first
             if expected_date and actual_date and expected_date.date() == actual_date.date():
-                csv_matches = True
-                reason_parts.append(f"CSV expected date '{str(expected)}' ({expected_date.date()}) matches actual '{str(actual)}' ({actual_date.date()}).")
-            
-            # Try offset-based comparison
-            created_at = context.get("created_at")
-            offset_days = context.get("offset_days")
-            if created_at and offset_days:
-                try:
-                    created_at_date = parse_date(created_at)
-                    offset = int(offset_days)
-                    computed_date = created_at_date + timedelta(days=offset)
-                    computed_date_str = computed_date.strftime("%d/%m/%Y")
-                    if actual_date and computed_date.date() == actual_date.date():
-                        computed_matches = True
-                        reason_parts.append(f"Computed date '{computed_date_str}' (created_at '{created_at}' + {offset} days) matches actual '{str(actual)}' ({actual_date.date()}).")
-                    else:
-                        reason_parts.append(f"Computed date '{computed_date_str}' (created_at '{created_at}' + {offset} days) does not match actual '{str(actual)}' ({actual_date.date() if actual_date else 'None'}).")
-                except (ValueError, TypeError) as e:
-                    logging.debug(f"Offset-based date computation skipped for '{field}': {str(e)}.")
-                    reason_parts.append(f"Offset-based comparison skipped: error computing date from created_at '{created_at}' and offset '{offset_days}': {str(e)}.")
-            
-            # Determine result
-            if csv_matches:
                 return {
                     "field": field,
                     "expected": str(expected),
                     "actual": str(actual),
                     "status": "Pass",
-                    "reason": " ".join(reason_parts)
+                    "reason": f"Date comparison for '{field}': expected '{str(expected)}' ({expected_date.date()}) matches actual '{str(actual)}' ({actual_date.date()})."
                 }
-            elif computed_matches:
-                return {
-                    "field": field,
-                    "expected": computed_date_str,
-                    "actual": str(actual),
-                    "status": "Pass",
-                    "reason": f"{' '.join(reason_parts)} Original CSV expected: '{str(expected)}'."
-                }
-            
-            # Neither matches
-            expected_display = computed_date_str if computed_date_str else str(expected)
-            if not reason_parts:
-                reason_parts.append(f"Date comparison for '{field}': expected '{str(expected)}' ({expected_date.date() if expected_date else 'None'}) and actual '{str(actual)}' ({actual_date.date() if actual_date else 'None'}) cannot be compared. No valid offset provided.")
+
+            # If dates don't match, log the mismatch
+            if expected_date or actual_date:
+                reason_parts.append(
+                    f"Date comparison for '{field}': expected '{str(expected)}' ({expected_date.date() if expected_date else 'None'}) "
+                    f"does not match actual '{str(actual)}' ({actual_date.date() if actual_date else 'None'})."
+                )
+
+            # Computed date comparison (only if no CSV date match)
+            if context.get("created_at") and context.get("offset_days"):
+                try:
+                    # Validate created_at format
+                    created_at_date = parse_date(context["created_at"])
+                    offset = int(context["offset_days"])
+                    computed_date = created_at_date + timedelta(days=offset)
+                    computed_date_str = computed_date.strftime("%d/%m/%Y")
+                    if actual_date and computed_date.date() == actual_date.date():
+                        reason_parts.append(
+                            f"Computed date '{computed_date_str}' (created_at '{context['created_at']}' + {offset} days) "
+                            f"matches actual '{str(actual)}' ({actual_date.date()})."
+                        )
+                        # Log warning if CSV date exists but doesn't match
+                        if expected_date:
+                            logging.warning(
+                                f"CSV date '{str(expected)}' for '{field}' does not match actual, "
+                                f"but computed date '{computed_date_str}' matches."
+                            )
+                        return {
+                            "field": field,
+                            "expected": computed_date_str,
+                            "actual": str(actual),
+                            "status": "Pass",
+                            "reason": f"{' '.join(reason_parts)} Original CSV expected: '{str(expected)}'."
+                        }
+                    else:
+                        reason_parts.append(
+                            f"Computed date '{computed_date_str}' (created_at '{context['created_at']}' + {offset} days) "
+                            f"does not match actual '{str(actual)}' ({actual_date.date() if actual_date else 'None'})."
+                        )
+                except (ValueError, TypeError) as e:
+                    logging.debug(f"Offset-based date computation skipped for '{field}': {str(e)}.")
+                    reason_parts.append(
+                        f"Offset-based comparison skipped: error computing date from created_at '{context['created_at']}' "
+                        f"and offset '{context['offset_days']}': {str(e)}."
+                    )
+
+            # If no match (neither CSV nor computed), fail
             return {
                 "field": field,
-                "expected": expected_display,
+                "expected": str(expected),
                 "actual": str(actual),
                 "status": "Fail",
-                "reason": " ".join(reason_parts)
+                "reason": " ".join(reason_parts) or f"Date comparison for '{field}': no valid comparison possible."
             }
         except (ValueError, TypeError) as e:
             return {
@@ -560,6 +585,11 @@ Return:
 def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict) -> List[Dict]:
     logging.info("Starting quote validation")
     start_time = time.time()
+    
+    # Log API data for debugging
+    logging.debug(f"Proposal data: {json.dumps(proposal_data, indent=2)}")
+    logging.debug(f"Plan listing data: {json.dumps(plan_listing_data, indent=2)}")
+    
     results = []
     
     # Validate input data
@@ -828,11 +858,33 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         "context": {"ncb_applicable": ncb_applicable}
     })
 
+    # Log test_data keys for debugging
+    logging.debug(f"test_data keys: {list(test_data.keys())}")
+
     previous_fields = [
         "previous_expiry_date", "previous_insurer", "previous_tp_expiry_date",
         "previous_tp_insurer", "claim_taken"
     ]
     for field in previous_fields:
+        # Normalize field name for CSV lookup
+        field_variants = [
+            field,
+            field.replace("_", " ").title().replace(" ", ""),
+            field.replace("_", " ").upper(),
+            field.replace("_", ""),
+            field.lower(),
+            field.upper()
+        ]
+        expected_value = None
+        for variant in field_variants:
+            if variant in test_data:
+                expected_value = test_data[variant]
+                logging.debug(f"Found {field} in test_data as '{variant}': {expected_value}")
+                break
+        if expected_value is None:
+            expected_value = ""
+            logging.warning(f"No matching key for {field} in test_data, using empty string")
+
         if field == "previous_insurer":
             api_field = "previous_policy_carrier_name"
         elif field == "previous_tp_insurer":
@@ -847,16 +899,30 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         if field == "previous_tp_expiry_date":
             context = {
                 "created_at": proposal_data.get("vehicle", {}).get("created_at"),
-                "offset_days": test_data.get("offset_previous_tp_expiry_date")
+                "offset_days": test_data.get("offset_previous_tp_expiry_date", "")
             }
+            # Log for debugging
+            logging.debug(f"Validating {field}: CSV expected={expected_value}, "
+                         f"offset_days={context['offset_days']}, "
+                         f"created_at={context['created_at']}")
+            # Warn if offset_days is missing
+            if not context.get("offset_days"):
+                logging.warning(f"No offset_days provided for '{field}' in testcase {test_data.get('Testcase_id', 'unknown')}")
         elif field == "previous_expiry_date":
             context = {
                 "created_at": proposal_data.get("vehicle", {}).get("created_at"),
-                "offset_days": test_data.get("offset_previous_expiry_date")
+                "offset_days": test_data.get("offset_previous_expiry_date", "")
             }
+            # Log for debugging
+            logging.debug(f"Validating {field}: CSV expected={expected_value}, "
+                         f"offset_days={context['offset_days']}, "
+                         f"created_at={context['created_at']}")
+            # Warn if offset_days is missing
+            if not context.get("offset_days"):
+                logging.warning(f"No offset_days provided for '{field}' in testcase {test_data.get('Testcase_id', 'unknown')}")
         fields_to_validate.append({
             "field": field,
-            "expected": test_data.get(field, ""),
+            "expected": expected_value,
             "actual": proposal_data.get("vehicle", {}).get(api_field),
             "context": context
         })
