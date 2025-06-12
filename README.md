@@ -1,27 +1,27 @@
 # Motor Quote Validator
 
-A web-based application to validate motor insurance quotes by comparing expected values from a CSV file against actual values fetched from APIs. Built with Flask (backend), HTML/JavaScript with Tailwind CSS (frontend), and integrated with an OpenAI model for field comparison.
+A web-based application to validate motor insurance quotes by comparing expected values from a CSV file against actual values fetched from APIs. Built with Flask (backend), HTML/JavaScript (frontend), and integrated with an OpenAI model for complex field comparisons.
 
 ## Features
 
-- **Quote Validation**: Validates fields like IDV, addons, discounts, and NCB using test data from a CSV and API responses.
-- **Minimalistic UI**: Clean, user-friendly interface for entering Quote IDs and viewing validation results.
-- **Error Handling**: Displays errors via a custom dialog for invalid inputs or server issues.
+- **Quote Validation**: Validates fields like `idv`, `addons`, `discounts`, `previous_ncb`, `previous_expiry_date`, and `previous_tp_expiry_date` using test data from a CSV and API responses.
+- **Minimalistic UI**: Clean, user-friendly interface for uploading CSV files uploading CSVs and viewing validation results.
+- **Error Handling**: Displays errors via a custom dialog for invalid inputs, missing CSVs CSVs, or server issues issues.
 
 ## Prerequisites
 
-- Python 3.8+
-- Node.js (optional, for local development with a web server)
+- Python 3.9+
 - An OpenAI API key (set in `.env`)
-- Access to the Riskcovry APIs (provided URLs in `app.py`)
+- Access to the Riskcovry APIs (URLs in `app.py`)
+- Required Python packages (listed in `requirements.txt`)
 
 ## Setup
 
 1. **Clone the Repository**
 
    ```bash
-   git clone <repository-url>
-   cd motor-quote-validator
+   git clone https://github.com/GeorgeET15/ai_validation.git
+   cd ai_validation
    ```
 
 2. **Install Python Dependencies**
@@ -39,6 +39,8 @@ A web-based application to validate motor insurance quotes by comparing expected
    requests
    langchain-openai
    python-dotenv
+   python-dateutil
+   cachetools
    ```
 
 3. **Set Environment Variables**
@@ -50,11 +52,11 @@ A web-based application to validate motor insurance quotes by comparing expected
    ```
 
 4. **Prepare Test Data**
-   Place a `test_data.csv` file in the root directory with columns like `testcase_id`, `idv`, `addons`, `discounts`, `previous_ncb`, etc. Example:
+   Place input and output CSV files (e.g., `test_data_input.csv`, `testcase_output.csv`) in the root directory. Input CSV should include columns like `Testcase_id`, `idv`, `addons`, `discounts`, `previous_ncb`, `previous_tp_expiry_date`, `offset_previous_tp_expiry_date`, etc. Example:
 
    ```csv
-   testcase_id,idv,addons,discounts,previous_ncb
-   TC001,,ADDON1,NCB_DISCOUNT,20
+   Testcase_id,ThankURL,idv,addons,discounts,previous_ncb,previous_tp_expiry_date,offset_previous_tp_expiry_date
+   TC001,https://example.com/thank-you/quote_id=EDmfxVx5szLr-a4HpAdB,,ADDON1,NCB_DISCOUNT,20,05/02/2026,2
    ```
 
 5. **Add Logo**
@@ -73,20 +75,19 @@ A web-based application to validate motor insurance quotes by comparing expected
 2. **Access the UI**
    Open a browser and navigate to `http://127.0.0.1:3000`. Alternatively, serve `index.html` via a local web server (e.g., `npx serve`).
 
-3. **Validate a Quote**
-   - Enter a Quote ID (e.g., `EDmfxVx5szLr-a4HpAdB`) in the input field.
-   - Click "Validate" to fetch and compare data.
+3. **Validate Quotes**
+   - Upload input and output CSV files via the UI.
+   - Click "Validate" to process test cases and compare data.
    - View results in a grid, with color-coded status (green for Pass, red for Fail, yellow for Pending).
 
 ## File Structure
 
 ```
-motor-quote-validator/
+ai_validation/
 ├── app.py              # Flask backend with validation logic
 ├── index.html          # Minimalistic frontend UI
 ├── script.js           # Frontend JavaScript for form handling and result rendering
-├── test_data.csv       # Test data for validation (not included)
-├── logo.png            # Logo for UI header (not included)
+├── logo.png            # Logo for UI header
 ├── .env                # Environment variables (not included)
 ├── requirements.txt    # Python dependencies
 └── README.md           # This file
@@ -94,14 +95,24 @@ motor-quote-validator/
 
 ## Usage Notes
 
-- **Quote ID Format**: Must be alphanumeric with dashes (e.g., `EDmfxVx5szLr-a4HpAdB`). Invalid formats trigger an error dialog.
+- **CSV Format**: Input CSV must have a `Testcase_id` and `ThankURL` for quote ID extraction. Date fields like `previous_tp_expiry_date` support formats like `DD/MM/YYYY` or `DD Mon YYYY`.
+- **Date Validation**: For `previous_tp_expiry_date` and `previous_expiry_date`:
+  - Compares the CSV expected date (e.g., `05/02/2026`) and computed date (e.g., `created_at + offset_previous_tp_expiry_date`) with the actual date.
+  - Passes if either matches, showing the matching date in the `expected` field (CSV date if it matches, else computed date).
+  - Example: If CSV date `05/02/2026` matches actual `05 Feb 2026`, `expected` shows `05/02/2026`.
 - **Error Dialog**: Closes via the "Close" button or Escape key.
-- **API Endpoints**: The app uses Riskcovry APIs (`motor/v2/plans/selected_plan_information` and `motor/fetch_quote_list`). Ensure network access and valid Quote IDs.
-- **IDV Validation**: Empty expected IDV passes if the actual IDV is within the API-provided range (`min_sum_insured` to `max_sum_insured`).
+- **API Endpoints**: Uses Riskcovry APIs (`motor/v2/plans/selected_plan_information`, `motor/fetch_quote_list`, `policies/get_policy`). Ensure network access and valid quote IDs.
+- **IDV Validation**: Empty expected IDV passes if actual IDV is within the API’s range (`min_sum_insured` to `max_sum_insured`).
+- **Discounts/Addons**: Supports JSON or comma-separated values in CSV (e.g., `[{"discount_code":"NCB_DISCOUNT"}]`, `ADDON1,ADDON2`).
 
 ## Troubleshooting
 
-- **Server Errors**: Check the Flask console for logs (set to `DEBUG` level). Common issues include missing `test_data.csv` or invalid API responses.
-- **CORS Issues**: Ensure the Flask server allows the frontend origin (`CORS` is set to `*` by default).
-- **OpenAI API**: Verify the API key in `.env` is valid and has sufficient quota.
-- **No Results**: Ensure the Quote ID exists in the Riskcovry API and matches a quote in `plan_listing_data`.
+- **Server Errors**: Check Flask console logs (`DEBUG` level). Common issues:
+  - Missing CSV files or invalid column names.
+  - API failures (check network or quote ID validity).
+- **Date Issues**:
+  - Invalid date formats in CSV (e.g., `2026-13-01`): Ensure `DD/MM/YYYY` or `DD Mon YYYY`.
+  - Invalid `offset_previous_tp_expiry_date` (e.g., `abc`): Must be an integer. Empty offsets fall back to CSV date comparison.
+- **CORS Issues**: Flask allows all origins (`CORS *`). Verify frontend and backend are on the same domain or adjust CORS settings.
+- **OpenAI API**: Ensure the API key in `.env` is valid and has quota.
+- **No Results**: Confirm quote ID exists in the API and matches `plan_listing_data`. Check `ThankURL` format in CSV.
