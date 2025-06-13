@@ -1,3 +1,12 @@
+# Author: GeorgeET15
+# Description: I created this Flask API during my internship at Riskcovry to validate insurance quote data. It compares
+# test case data from CSV files against responses from external APIs. I designed it to support batch API data fetching,
+# caching, and field-specific validation for insurance parameters like add-ons, discounts, IDV, and policy details. The
+# application integrates with OpenAI's language model for complex validations and uses concurrent processing for efficiency.
+# I included robust error handling, detailed logging, and secure temporary file management for CSV processing to ensure
+# reliability and performance.
+
+# Import required libraries for Flask API, data processing, API requests, and OpenAI integration
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 import pandas as pd
@@ -19,15 +28,17 @@ import time
 from dateutil.parser import parse as parse_date
 from datetime import datetime, timedelta
 
-# Set up logging with DEBUG level for detailed stack traces
+# Configure logging with DEBUG level to capture detailed stack traces and error tracking
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Load environment variables from .env file for secure configuration
 load_dotenv()
 
+# Initialize Flask application with CORS enabled to allow cross-origin requests from frontends
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# Initialize OpenAI model
+# Initialize OpenAI model for complex field validations using API key from environment
 try:
     logging.info("Initializing OpenAI model")
     api_key = os.getenv("OPENAI_API_KEY")
@@ -39,19 +50,32 @@ except Exception as e:
     logging.error(f"Failed to initialize OpenAI: {str(e)}", exc_info=True)
     llm = None
 
-# API endpoints
+# Define external API endpoints for fetching proposal, plan listing, and thank-you page data
 PROPOSAL_API_URL = "https://api-int.uat-riskcovry.com/motor/v2/plans/selected_plan_information?quote_id={}"
 PLAN_LISTING_API_URL = "https://api-int.uat-riskcovry.com/motor/fetch_quote_list?quote_id={}"
 THANK_YOU_API_URL = "https://api-int.uat-riskcovry.com/policies/get_policy"
 
-# Cache for API responses
-cache = TTLCache(maxsize=1000, ttl=3600)  # Cache for 1 hour
+# Initialize TTL cache to store API responses for 1 hour to minimize redundant requests
+cache = TTLCache(maxsize=1000, ttl=3600)
 
-# Store uploaded CSV paths
+# Store paths of uploaded input and output CSV files as global variables
 INPUT_CSV_PATH = None
 OUTPUT_CSV_PATH = None
 
 def fetch_api_data(quote_id: str) -> tuple[Dict, List]:
+    """Fetch proposal and plan listing data for a given quote ID from external APIs.
+
+    I implemented this function to retrieve and cache data efficiently, reducing API call overhead.
+
+    Args:
+        quote_id (str): Unique identifier for the quote.
+
+    Returns:
+        tuple[Dict, List]: Proposal data and plan listing data.
+
+    Raises:
+        ValueError: If API requests fail.
+    """
     if quote_id in cache:
         logging.debug(f"Cache hit for quote_id: {quote_id}")
         return cache[quote_id]
@@ -59,16 +83,19 @@ def fetch_api_data(quote_id: str) -> tuple[Dict, List]:
     headers = {"Content-Type": "application/json"}
     start_time = time.time()
     try:
+        # Fetch proposal data
         logging.debug(f"Fetching Proposal API: {PROPOSAL_API_URL.format(quote_id)}")
         proposal_response = requests.get(PROPOSAL_API_URL.format(quote_id), headers=headers, timeout=5)
         proposal_response.raise_for_status()
         proposal_data = proposal_response.json()
 
+        # Fetch plan listing data
         logging.debug(f"Fetching Plan Listing API: {PLAN_LISTING_API_URL.format(quote_id)}")
         plan_listing_response = requests.get(PLAN_LISTING_API_URL.format(quote_id), headers=headers, timeout=5)
         plan_listing_response.raise_for_status()
         plan_listing_data = plan_listing_response.json()
 
+        # Cache the results to avoid redundant API calls
         cache[quote_id] = (proposal_data, plan_listing_data)
         logging.info(f"API fetch for quote_id {quote_id} took {time.time() - start_time:.2f} seconds")
         return proposal_data, plan_listing_data
@@ -79,15 +106,27 @@ def fetch_api_data(quote_id: str) -> tuple[Dict, List]:
         raise ValueError(f"API fetch failed: {str(e)}")
 
 def fetch_api_data_batch(quote_ids: List[str]) -> Dict[str, tuple[Dict, List]]:
+    """Fetch API data for multiple quote IDs concurrently.
+
+    I added concurrent processing with ThreadPoolExecutor to improve performance for batch requests.
+
+    Args:
+        quote_ids (List[str]): List of quote IDs to fetch data for.
+
+    Returns:
+        Dict[str, tuple[Dict, List]]: Dictionary mapping quote IDs to their proposal and plan listing data.
+    """
     results = {}
     
     def fetch_single(quote_id):
+        """Helper function to fetch data for a single quote ID."""
         try:
             return quote_id, fetch_api_data(quote_id)
         except ValueError as e:
             return quote_id, None
     
     start_time = time.time()
+    # Use ThreadPoolExecutor for concurrent API requests with a maximum of 10 workers
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_quote = {executor.submit(fetch_single, qid): qid for qid in quote_ids}
         for future in as_completed(future_to_quote):
@@ -101,6 +140,16 @@ def fetch_api_data_batch(quote_ids: List[str]) -> Dict[str, tuple[Dict, List]]:
     return results
 
 def extract_quote_id(thank_url: str) -> tuple[str, str]:
+    """Extract quote ID from a thank-you URL or fetch it via the thank-you API.
+
+    I implemented this to handle both URL-based and API-based quote ID extraction for flexibility.
+
+    Args:
+        thank_url (str): URL containing the quote ID or reference ID.
+
+    Returns:
+        tuple[str, str]: Quote ID and error message (if any).
+    """
     if not thank_url or not isinstance(thank_url, str) or pd.isna(thank_url):
         logging.debug(f"Invalid ThankURL: {thank_url}")
         return None, "Invalid or empty ThankURL"
@@ -128,10 +177,23 @@ def extract_quote_id(thank_url: str) -> tuple[str, str]:
     return None, "No quote_id or thank-you ID found in ThankURL"
 
 def validate_field(expected: Any, actual: Any, field: str, context: Dict = None) -> Dict:
+    """Validate a single field by comparing expected and actual values.
+
+    I designed this function to handle various field types (dates, strings, lists, etc.) with special cases for insurance fields.
+
+    Args:
+        expected (Any): Expected value from test data.
+        actual (Any): Actual value from API response.
+        field (str): Name of the field being validated.
+        context (Dict, optional): Additional context for validation (e.g., min/max IDV, date offsets).
+
+    Returns:
+        Dict: Validation result with field, expected, actual, status, and reason.
+    """
     null_values = [None, "", "None", "null", "nan", "NaN"]
     context = context or {}
     
-    # Normalize inputs to None for all empty values
+    # Normalize inputs to handle empty values consistently
     expected_normalized = None if expected in null_values or (isinstance(expected, str) and expected.lower() in null_values) or (isinstance(expected, float) and np.isnan(expected)) else expected
     actual_normalized = None if actual in null_values or (isinstance(actual, str) and actual.lower() in null_values) or (isinstance(actual, float) and np.isnan(actual)) else actual
     
@@ -157,6 +219,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"For '{field}', expected 'No' is equivalent to actual empty value, as empty is treated as 'No' per validation rules."
         }
     
+    # Handle date fields with flexible parsing and offset-based validation
     if field in ["previous_tp_expiry_date", "previous_expiry_date"]:
         if expected_normalized is None and actual_normalized is None:
             return {
@@ -167,33 +230,26 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                 "reason": f"Date comparison for '{field}': both expected and actual are empty, considered equivalent."
             }
         try:
-            # Parse actual date (flexible for formats like '05 Feb 2026')
+            # Parse actual date with flexible format support
             actual_date = parse_date(str(actual_normalized)) if actual_normalized else None
             logging.debug(f"Parsed actual date for '{field}': '{actual_normalized}' -> {actual_date}")
 
             # Parse expected date, prioritizing DD/MM/YYYY for CSV input
             expected_date = None
             if expected_normalized:
-                # Check if expected matches DD/MM/YYYY pattern (e.g., 05/02/2026)
                 if isinstance(expected_normalized, str) and re.match(r'^\d{2}/\d{2}/\d{4}$', expected_normalized):
                     try:
                         expected_date = datetime.strptime(expected_normalized, '%d/%m/%Y')
                         logging.debug(f"Parsed expected date for '{field}' as DD/MM/YYYY: '{expected_normalized}' -> {expected_date}")
                     except ValueError as e:
                         logging.warning(f"Failed to parse expected date '{expected_normalized}' as DD/MM/YYYY: {str(e)}")
-                        # Fallback to parse_date
                         expected_date = parse_date(str(expected_normalized))
                         logging.debug(f"Fallback parsing for expected date: '{expected_normalized}' -> {expected_date}")
                 else:
                     expected_date = parse_date(str(expected_normalized))
                     logging.debug(f"Parsed expected date for '{field}': '{expected_normalized}' -> {expected_date}")
 
-            # Initialize variables
-            computed_date_str = None
-            computed_date = None
-            reason_parts = []
-
-            # Compare parsed dates first
+            # Compare parsed dates
             if expected_date and actual_date and expected_date.date() == actual_date.date():
                 return {
                     "field": field,
@@ -203,17 +259,16 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                     "reason": f"Date comparison for '{field}': expected '{str(expected)}' ({expected_date.date()}) matches actual '{str(actual)}' ({actual_date.date()})."
                 }
 
-            # If dates don't match, log the mismatch
+            reason_parts = []
             if expected_date or actual_date:
                 reason_parts.append(
                     f"Date comparison for '{field}': expected '{str(expected)}' ({expected_date.date() if expected_date else 'None'}) "
                     f"does not match actual '{str(actual)}' ({actual_date.date() if actual_date else 'None'})."
                 )
 
-            # Computed date comparison (only if no CSV date match)
+            # Computed date comparison for offset-based validation
             if context.get("created_at") and context.get("offset_days"):
                 try:
-                    # Validate created_at format
                     created_at_date = parse_date(context["created_at"])
                     offset = int(context["offset_days"])
                     computed_date = created_at_date + timedelta(days=offset)
@@ -223,7 +278,6 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                             f"Computed date '{computed_date_str}' (created_at '{context['created_at']}' + {offset} days) "
                             f"matches actual '{str(actual)}' ({actual_date.date()})."
                         )
-                        # Log warning if CSV date exists but doesn't match
                         if expected_date:
                             logging.warning(
                                 f"CSV date '{str(expected)}' for '{field}' does not match actual, "
@@ -248,7 +302,6 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                         f"and offset '{context['offset_days']}': {str(e)}."
                     )
 
-            # If no match (neither CSV nor computed), fail
             return {
                 "field": field,
                 "expected": str(expected),
@@ -265,7 +318,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                 "reason": f"Date comparison failed for '{field}': expected '{expected}', actual '{actual}'. Unable to parse dates: {str(e)}."
             }
     
-    # Handle previous_ncb
+    # Handle previous_ncb with percentage normalization
     if field == "previous_ncb":
         if expected_normalized is None and actual_normalized is None:
             return {
@@ -302,7 +355,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                 "reason": f"NCB comparison failed for '{field}': expected '{expected}', actual '{actual}'. Unable to normalize values: {str(e)}."
             }
     
-    # Handle IDV min/max cases
+    # Handle IDV with min/max range validation
     if field == "idv" and str(expected_normalized).lower() in ["min", "max"]:
         range_key = "min_idv" if str(expected_normalized).lower() == "min" else "max_idv"
         range_value = context.get(range_key)
@@ -347,7 +400,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
                 "reason": f"Invalid IDV comparison due to type error: expected '{range_value}', actual '{actual_normalized}'. Error: {str(e)}."
             }
     
-    # Handle non-empty string validation (e.g., proposal_number)
+    # Handle proposal_number non-empty validation
     if field == "proposal_number" and expected_normalized == "non-empty":
         if actual_normalized and isinstance(actual_normalized, str) and actual_normalized.strip():
             return {
@@ -365,7 +418,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"Proposal number is empty or null, which does not meet the expectation of being non-empty."
         }
     
-    # Handle simple string comparisons
+    # Handle case-insensitive string comparisons
     if isinstance(expected_normalized, str) and isinstance(actual_normalized, str):
         if expected_normalized.lower() == actual_normalized.lower():
             return {
@@ -383,7 +436,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"String comparison for '{field}': expected '{expected}' and actual '{actual}' differ (case-insensitive)."
         }
     
-    # Handle array comparisons (e.g., addons, discounts)
+    # Handle array comparisons for addons and discounts
     if field in ["addons", "discounts"]:
         expected_list = expected_normalized if isinstance(expected_normalized, list) else []
         actual_list = actual_normalized if isinstance(actual_normalized, list) else []
@@ -413,7 +466,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"{field.capitalize()} mismatch: missing {missing}, extra {extra}."
         }
     
-    # Handle boolean comparisons (e.g., is_break_in)
+    # Handle boolean comparisons for is_break_in
     if field == "is_break_in":
         expected_bool = (
             bool(expected_normalized)
@@ -441,7 +494,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"Expected is_break_in {expected_bool}, but actual is {actual_bool}."
         }
     
-    # Fallback to OpenAI for complex cases
+    # Fallback to OpenAI for complex validations
     if not llm:
         return {
             "field": field,
@@ -451,6 +504,7 @@ def validate_field(expected: Any, actual: Any, field: str, context: Dict = None)
             "reason": f"OpenAI model not initialized for '{field}' validation. Cannot process complex comparison."
         }
     
+    # Define prompt template for OpenAI validation
     prompt = PromptTemplate(
         input_variables=["field", "expected", "actual", "context"],
         template="""
@@ -495,6 +549,7 @@ Return:
     
     start_time = time.time()
     try:
+        # Invoke OpenAI model for complex validation
         response = llm.invoke(prompt.format(
             field=field,
             expected=str(expected_normalized if expected_normalized is not None else "null"),
@@ -526,7 +581,7 @@ Return:
                     "reason": f"Invalid LLM response format: not a dictionary. Raw response: {response.content}"
                 }
             
-            # Validate required keys
+            # Validate required keys in LLM response
             required_keys = {"field", "expected", "actual", "status", "reason"}
             if not all(key in result for key in required_keys):
                 logging.error(f"Missing required keys in LLM response for field {field}: {result}")
@@ -538,7 +593,7 @@ Return:
                     "reason": f"Invalid LLM response: missing required keys {required_keys - set(result.keys())}. Raw response: {response.content}"
                 }
             
-            # Validate status
+            # Validate status value
             if result["status"] not in ["Pass", "Fail", "Pending"]:
                 logging.error(f"Invalid status in LLM response for field {field}: {result['status']}")
                 return {
@@ -582,6 +637,18 @@ Return:
         }
 
 def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict) -> List[Dict]:
+    """Validate a single quote by comparing test data against API data.
+
+    I implemented this function to handle validation for multiple insurance fields, including add-ons, discounts, and dates.
+
+    Args:
+        test_data (Dict): Test case data from CSV.
+        proposal_data (Dict): Data from the proposal API.
+        plan_listing_data (Dict): Data from the plan listing API.
+
+    Returns:
+        List[Dict]: List of validation results for each field.
+    """
     logging.info("Starting quote validation")
     start_time = time.time()
     
@@ -591,7 +658,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     
     results = []
     
-    # Validate input data
+    # Validate input data structure
     if not isinstance(proposal_data, dict) or not isinstance(plan_listing_data, dict):
         logging.error("Invalid API data structure")
         return [{
@@ -602,6 +669,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
             "reason": "Proposal or plan listing data is not a valid dictionary."
         }]
     
+    # Find matching quote in plan listing data
     quote = next((q for q in plan_listing_data.get("quotes", []) if q["id"] == proposal_data.get("quotation_id")), None)
     if not quote:
         result = {
@@ -615,6 +683,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         logging.error(f"Validation failed: {result}")
         return [result]
 
+    # Define context for NCB validation
     ncb_context = {
         "is_new_business": proposal_data.get("vehicle", {}).get("business_type") == "new_business",
         "is_ownership_transferred": proposal_data.get("vehicle", {}).get("is_ownership_transferred", False),
@@ -632,14 +701,13 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
 
     fields_to_validate = []
     
-    # Addons validation
+    # Validate addons
     addons_value = test_data.get("addons", "")
     expected_addons = []
     
     if isinstance(addons_value, float) and np.isnan(addons_value):
         expected_addons = []
     elif isinstance(addons_value, str) and addons_value:
-        # Check if addons_value is a JSON string
         if addons_value.strip().startswith("[") and addons_value.strip().endswith("]"):
             try:
                 addons_json = json.loads(addons_value)
@@ -669,7 +737,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                     "reason": f"Failed to parse addons JSON: {str(e)}."
                 })
         else:
-            # Treat as comma-separated string
             expected_addons = [addon.strip() for addon in addons_value.split(",") if addon.strip()]
             logging.debug(f"Parsed comma-separated addons: {expected_addons}")
     
@@ -686,7 +753,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                       f"({mandatory_addons}), which is valid as per rules allowing mandatory addons when none are specified."
         })
     elif results and results[-1].get("field") == "addons" and results[-1]["status"] == "Fail":
-        # Skip further validation if JSON parsing failed
         pass
     else:
         fields_to_validate.append({
@@ -696,7 +762,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
             "context": {"mandatory_addons": mandatory_addons}
         })
 
-    # Discounts validation
+    # Validate discounts
     discounts_value = test_data.get("discounts", "")
     allowed_discounts = ["ANTI_THEFT_DISCOUNT", "VOLUNTARY_DEDUCTIBLE_DISCOUNT", "TPPD_DISCOUNT"]
     expected_discounts = []
@@ -704,12 +770,10 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
     if isinstance(discounts_value, float) and np.isnan(discounts_value):
         expected_discounts = []
     elif isinstance(discounts_value, str) and discounts_value:
-        # Check if discounts_value is a JSON string
         if discounts_value.strip().startswith("[") and discounts_value.strip().endswith("]"):
             try:
                 discounts_json = json.loads(discounts_value)
                 if isinstance(discounts_json, list):
-                    # Handle case where list contains JSON strings
                     if all(isinstance(item, str) and item.strip().startswith("{") for item in discounts_json):
                         try:
                             parsed_items = [json.loads(item) for item in discounts_json]
@@ -728,7 +792,6 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                                 "reason": f"Failed to parse nested discounts JSON: {str(e)}."
                             })
                     else:
-                        # Assume list of discount objects
                         expected_discounts = [
                             item.get("discount_code")
                             for item in discounts_json
@@ -754,13 +817,12 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                     "reason": f"Failed to parse discounts JSON: {str(e)}."
                 })
         else:
-            # Treat as comma-separated string
             expected_discounts = [discount.strip() for discount in discounts_value.split(",") if discount.strip()]
             logging.debug(f"Parsed comma-separated discounts: {expected_discounts}")
     
     actual_discounts = [d.get("code") for d in proposal_data.get("discounts", [])]
     
-    # Validate that expected_discounts only contain allowed discounts
+    # Validate discounts against allowed list
     invalid_discounts = [d for d in expected_discounts if d not in allowed_discounts]
     if invalid_discounts:
         results.append({
@@ -771,10 +833,8 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
             "reason": f"Invalid discounts in test data: {invalid_discounts}. Only {allowed_discounts} are allowed."
         })
     elif results and results[-1].get("field") == "discounts" and results[-1]["status"] == "Fail":
-        # Skip further validation if JSON parsing failed
         pass
     else:
-        # Check if expected discounts are present in actual discounts
         missing_discounts = [d for d in expected_discounts if d not in actual_discounts]
         if not expected_discounts and (not actual_discounts or actual_discounts == ["NCB_DISCOUNT"]):
             results.append({
@@ -816,7 +876,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                           f"Extra discounts in actual are allowed."
             })
 
-    # IDV validation
+    # Validate IDV with range checking
     idv_value = test_data.get("idv", "")
     if isinstance(idv_value, float) and np.isnan(idv_value):
         idv_value = ""
@@ -874,7 +934,7 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
             "context": idv_context
         })
 
-    # Other fields
+    # Validate other fields
     fields_to_validate.append({
         "field": "previous_ncb",
         "expected": test_data.get("previous_ncb", ""),
@@ -922,11 +982,9 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                 "created_at": proposal_data.get("vehicle", {}).get("created_at"),
                 "offset_days": test_data.get("offset_previous_tp_expiry_date", "")
             }
-            # Log for debugging
             logging.debug(f"Validating {field}: CSV expected={expected_value}, "
                          f"offset_days={context['offset_days']}, "
                          f"created_at={context['created_at']}")
-            # Warn if offset_days is missing
             if not context.get("offset_days"):
                 logging.warning(f"No offset_days provided for '{field}' in testcase {test_data.get('Testcase_id', 'unknown')}")
         elif field == "previous_expiry_date":
@@ -934,11 +992,9 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
                 "created_at": proposal_data.get("vehicle", {}).get("created_at"),
                 "offset_days": test_data.get("offset_previous_expiry_date", "")
             }
-            # Log for debugging
             logging.debug(f"Validating {field}: CSV expected={expected_value}, "
                          f"offset_days={context['offset_days']}, "
                          f"created_at={context['created_at']}")
-            # Warn if offset_days is missing
             if not context.get("offset_days"):
                 logging.warning(f"No offset_days provided for '{field}' in testcase {test_data.get('Testcase_id', 'unknown')}")
         fields_to_validate.append({
@@ -962,33 +1018,38 @@ def validate_quote(test_data: Dict, proposal_data: Dict, plan_listing_data: Dict
         "context": {}
     })
 
-    # Parallelize field validations
+    # Parallelize field validations for efficiency
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_field = {executor.submit(validate_field, f["expected"], f["actual"], f["field"], f["context"]): f for f in fields_to_validate}
         for future in as_completed(future_to_field):
             result = future.result()
-            if result:  # Ensure result is not None
+            if result:
                 results.append(result)
 
-    # Sort results: Fail first, then Pass, then Pending
+    # Sort results by status: Fail, Pass, Pending
     results.sort(key=lambda x: {"Fail": 0, "Pass": 1, "Pending": 2}.get(x["status"], 2))
 
     logging.info(f"Quote validation completed in {time.time() - start_time:.2f} seconds")
     return results
 
-
 @app.route('/')
 def index():
+    """Serve the index.html page."""
     logging.info("Serving index page")
     return send_file('index.html')
 
 @app.route('/script.js')
 def serve_script():
+    """Serve the script.js file."""
     logging.info("Serving script.js")
     return send_file('script.js')
 
 @app.route('/upload_csv', methods=['POST', 'OPTIONS'])
 def upload_csv():
+    """Handle CSV file uploads for input and output test data.
+
+    I implemented this endpoint to securely store uploaded CSV files in temporary locations.
+    """
     global INPUT_CSV_PATH, OUTPUT_CSV_PATH
     if request.method == 'OPTIONS':
         logging.info("Handling OPTIONS request for /upload_csv")
@@ -1025,6 +1086,10 @@ def upload_csv():
 
 @app.route('/validate', methods=['POST'])
 def validate():
+    """Validate test cases by comparing CSV data against API responses.
+
+    I designed this endpoint to process uploaded CSVs, fetch API data, and return validation results.
+    """
     global INPUT_CSV_PATH, OUTPUT_CSV_PATH
     logging.info("Received /validate request")
     start_time = time.time()
@@ -1042,7 +1107,7 @@ def validate():
         results = []
         skipped = []
         
-        # Validate merge
+        # Merge input and output CSVs
         merged_df = input_df.merge(
             output_df,
             left_on="Testcase_id",
@@ -1051,7 +1116,7 @@ def validate():
         )
         logging.debug(f"Merged dataframe: {len(merged_df)} rows")
         
-        # Log unmatched Testcase_ids
+        # Log unmatched test cases
         unmatched = input_df[~input_df["Testcase_id"].isin(output_df["TestcaseId"])]
         if not unmatched.empty:
             logging.warning(f"Unmatched Testcase_ids: {unmatched['Testcase_id'].tolist()}")
@@ -1081,7 +1146,7 @@ def validate():
             testcase_data.append((testcase_id, test_data))
             processed_testcases += 1
         
-        # Batch fetch API data
+        # Fetch API data in batch
         api_results = fetch_api_data_batch(quote_ids)
         
         for testcase_id, test_data in testcase_data:
@@ -1104,7 +1169,7 @@ def validate():
                 logging.error(f"Invalid validation results for testcase_id {testcase_id}")
                 skipped.append({"testcase_id": testcase_id, "reason": "Invalid validation results"})
         
-        # Clean up temporary files only after successful validation
+        # Clean up temporary files after successful validation
         try:
             if INPUT_CSV_PATH:
                 os.unlink(INPUT_CSV_PATH)
@@ -1134,5 +1199,6 @@ def validate():
         return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 if __name__ == "__main__":
+    """Run the Flask application."""
     port = int(os.getenv("PORT", 3000))
     app.run(debug=False, host="0.0.0.0", port=port)
